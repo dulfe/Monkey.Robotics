@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
@@ -14,6 +15,7 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
         public event EventHandler<CharacteristicReadEventArgs> ValueUpdated;
 
         protected GattCharacteristicWithValue _gattCharacteristicWithValue;
+        private bool _notifiedEnabled = false;
 
         public Characteristic(GattCharacteristicWithValue gattCharacteristicWithValue)
         {
@@ -35,26 +37,45 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
             get { return _gattCharacteristicWithValue.Uuid.ToString(); }
         }
 
+        private byte[] _Value;
+
         public byte[] Value
         {
-            get { return _gattCharacteristicWithValue.Value; }
+            get
+            {
+                if (!_notifiedEnabled)
+                    _Value = ReadValue().Result;
+
+                return _Value;
+            }
         }
 
         public string StringValue
         {
-            get { return _gattCharacteristicWithValue.Value.ToString(); }
+            get
+            {
+                var value = Value;
+
+                return Encoding.UTF8.GetString(value, 0, value.Length);
+            }
         }
 
         public IList<IDescriptor> Descriptors
         {
-            get 
+            get
             {
-                if(_descriptors == null)
+                if (_descriptors == null)
                 {
+                    _descriptors = new List<IDescriptor>();
+
                     foreach (KnownDescriptor kd in KnownDescriptors.GetDescriptors())
                     {
-                        var d = _gattCharacteristicWithValue.NativeCharacteristic.GetDescriptors(kd.ID)[0];
-                        _descriptors.Add(new Descriptor(d));
+                        //var d = _gattCharacteristicWithValue.NativeCharacteristic.GetDescriptors(kd.ID)[0];
+                        var descriptors = _gattCharacteristicWithValue.NativeCharacteristic.GetDescriptors(kd.ID);
+                        if (descriptors.Count > 0)
+                        {
+                            _descriptors.Add(new Descriptor(descriptors[0]));
+                        }
                     }
                 }
                 return _descriptors;
@@ -79,7 +100,7 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
 
         public bool CanRead
         {
-            get 
+            get
             {
                 if (CheckGattProperty(GattCharacteristicProperties.Read))
                     return true;
@@ -99,34 +120,55 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
 
         public bool CanWrite
         {
-            get {
+            get
+            {
                 if (CheckGattProperty(GattCharacteristicProperties.Write) || CheckGattProperty(GattCharacteristicProperties.WriteWithoutResponse))
                     return true;
                 return false;
             }
         }
 
-        public void StartUpdates()
+        public async Task<byte[]> ReadValue()
         {
-            bool successful = false;
-            if (CanRead)
+            var result = await _gattCharacteristicWithValue.NativeCharacteristic.ReadValueAsync(BluetoothCacheMode.Uncached);
+
+            if (result.Status == GattCommunicationStatus.Success)
             {
-                Console.WriteLine("** Characteristic.RequestValue, PropertyType = Read, requesting read");
-                _gattCharacteristicWithValue.NativeCharacteristic.ValueChanged += ValueChanged;
-
-                //TODO .... is this enough?
-
-                successful = true;
+                byte[] forceData = new byte[result.Value.Length];
+                DataReader.FromBuffer(result.Value).ReadBytes(forceData);
+                return forceData;
             }
-            if (CanUpdate)
+            else
             {
-                Console.WriteLine("** Characteristic.RequestValue, PropertyType = Notify, requesting updates");
-
-                RegisterForUpdates();
+                return null;
             }
         }
 
-        async Task RegisterForUpdates ()
+        public async void StartUpdates()
+        {
+            //if (CanRead)
+            //{
+            //    Debug.WriteLine("** Characteristic.RequestValue, PropertyType = Read, requesting read");
+            //    _gattCharacteristicWithValue.NativeCharacteristic.ValueChanged += UpdatedRead;
+            //}
+            if (CanUpdate)
+            {
+                if (!_notifiedEnabled)
+                {
+                    Debug.WriteLine("** Characteristic.RequestValue, PropertyType = Notify, requesting updates");
+
+                    _gattCharacteristicWithValue.NativeCharacteristic.ValueChanged += UpdatedNotify;
+                    await RegisterForUpdates();
+                    _notifiedEnabled = true;
+                }
+                else
+                {
+                    Debug.WriteLine("StartUpdates: Already receiving updates.");
+                }
+            }
+        }
+
+        async Task RegisterForUpdates()
         {
             await this._gattCharacteristicWithValue.NativeCharacteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
 
@@ -137,19 +179,30 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
             }
             else
             {
-                Console.WriteLine("RequestValue, FAILED: _nativeCharacteristic.Descriptors was empty, not sure why");
+                Debug.WriteLine("RequestValue, FAILED: _nativeCharacteristic.Descriptors was empty, not sure why");
             }
 
         }
 
-        public void StopUpdates()
+        public async void StopUpdates()
         {
-            this._gattCharacteristicWithValue.NativeCharacteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None);
-                
+            await this._gattCharacteristicWithValue.NativeCharacteristic.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None);
+
+            _gattCharacteristicWithValue.NativeCharacteristic.ValueChanged -= UpdatedNotify;
+            _notifiedEnabled = false;
         }
 
-        void ValueChanged(GattCharacteristic sender, GattValueChangedEventArgs args)
+
+        void UpdatedNotify(GattCharacteristic sender, GattValueChangedEventArgs args)
         {
+            _Value = new byte[args.CharacteristicValue.Length];
+            Windows.Storage.Streams.DataReader.FromBuffer(args.CharacteristicValue).ReadBytes(_Value);
+
+            this.ValueUpdated(this, new CharacteristicReadEventArgs()
+            {
+                Characteristic = this
+            });
+
             Debug.WriteLine("Characteristic Value Changed");
         }
 
@@ -178,7 +231,7 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
             //TODO: I don't understand this method ..... 
             return new Characteristic(val);
 
-            
+
         }
 
         public async void Write(byte[] data)
@@ -194,7 +247,7 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
             await _gattCharacteristicWithValue.NativeCharacteristic.WriteValueAsync(buffer, GattWriteOption.WriteWithoutResponse);
         }
 
-        public bool CheckGattProperty (GattCharacteristicProperties gattProperty)
+        public bool CheckGattProperty(GattCharacteristicProperties gattProperty)
         {
             if (((int)_gattCharacteristicWithValue.NativeCharacteristic.CharacteristicProperties & (int)gattProperty) != 0)
             {
@@ -202,6 +255,7 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
             }
             return false;
         }
+
     }
 
     //GattCharacteristic is sealed so we can't inherit 
@@ -220,7 +274,9 @@ namespace Robotics.Mobile.Core.Bluetooth.LE
 
         public Guid ID { get { return NativeCharacteristic.Uuid; } }
 
-        public string Uuid { get { return NativeCharacteristic.Uuid.ToString(); }
+        public string Uuid
+        {
+            get { return NativeCharacteristic.Uuid.ToString(); }
         }
 
 

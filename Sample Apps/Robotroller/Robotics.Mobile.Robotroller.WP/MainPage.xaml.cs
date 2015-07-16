@@ -28,7 +28,7 @@ namespace Robotics.Mobile.Robotroller.WP
 
             Xamarin.Forms.Forms.Init();
 
-            InitGyroscope();
+            //InitGyroscope();
 
             var a = new Robotics.Mobile.Core.Bluetooth.LE.Adapter();
 
